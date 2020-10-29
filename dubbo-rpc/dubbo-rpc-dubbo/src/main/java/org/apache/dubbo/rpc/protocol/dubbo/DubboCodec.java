@@ -16,6 +16,7 @@
  */
 package org.apache.dubbo.rpc.protocol.dubbo;
 
+import org.apache.dubbo.common.URL;
 import org.apache.dubbo.common.Version;
 import org.apache.dubbo.common.io.Bytes;
 import org.apache.dubbo.common.io.UnsafeByteArrayInputStream;
@@ -23,6 +24,7 @@ import org.apache.dubbo.common.logger.Logger;
 import org.apache.dubbo.common.logger.LoggerFactory;
 import org.apache.dubbo.common.serialize.ObjectInput;
 import org.apache.dubbo.common.serialize.ObjectOutput;
+import org.apache.dubbo.common.utils.ReflectUtils;
 import org.apache.dubbo.common.utils.StringUtils;
 import org.apache.dubbo.remoting.Channel;
 import org.apache.dubbo.remoting.exchange.Request;
@@ -39,6 +41,8 @@ import java.io.InputStream;
 import static org.apache.dubbo.common.constants.CommonConstants.DUBBO_VERSION_KEY;
 import static org.apache.dubbo.common.constants.CommonConstants.PATH_KEY;
 import static org.apache.dubbo.common.constants.CommonConstants.VERSION_KEY;
+import static org.apache.dubbo.remoting.Constants.DEFAULT_REMOTING_SERIALIZATION;
+import static org.apache.dubbo.remoting.Constants.SERIALIZATION_KEY;
 import static org.apache.dubbo.rpc.protocol.dubbo.CallbackServiceCodec.encodeInvocationArgument;
 import static org.apache.dubbo.rpc.protocol.dubbo.Constants.DECODE_IN_IO_THREAD_KEY;
 import static org.apache.dubbo.rpc.protocol.dubbo.Constants.DEFAULT_DECODE_IN_IO_THREAD;
@@ -165,14 +169,36 @@ public class DubboCodec extends ExchangeCodec {
 
     @Override
     protected void encodeRequestData(Channel channel, ObjectOutput out, Object data, String version) throws IOException {
-        RpcInvocation inv = (RpcInvocation) data;
+        URL url = channel.getUrl();
+        String dubboVersion = url.getParameter(DUBBO_VERSION_KEY);
 
+        RpcInvocation inv = (RpcInvocation) data;
         out.writeUTF(version);
         out.writeUTF(inv.getAttachment(PATH_KEY));
         out.writeUTF(inv.getAttachment(VERSION_KEY));
-
         out.writeUTF(inv.getMethodName());
-        out.writeUTF(inv.getParameterTypesDesc());
+
+        //modify by chaihaipeng
+        if ("2.8.4-SNAPSHOT".equalsIgnoreCase(dubboVersion)) {
+            if (optimizedSerializationType(url) && !this.containComplexArguments(inv)) {
+                out.writeInt(inv.getParameterTypes().length);
+            } else {
+                out.writeInt(-1);
+                out.writeUTF(ReflectUtils.getDesc(inv.getParameterTypes()));
+            }
+        } else if ("2.8.4".equalsIgnoreCase(dubboVersion)) {
+            if (optimizedSerializationType(url)) {
+                if (!this.containComplexArguments(inv)) {
+                    out.writeInt(inv.getParameterTypes().length);
+                } else {
+                    out.writeInt(-1);
+                }
+            } else {
+                out.writeUTF(ReflectUtils.getDesc(inv.getParameterTypes()));
+            }
+        } else {
+            out.writeUTF(inv.getParameterTypesDesc());
+        }
         Object[] args = inv.getArguments();
         if (args != null) {
             for (int i = 0; i < args.length; i++) {
@@ -180,6 +206,20 @@ public class DubboCodec extends ExchangeCodec {
             }
         }
         out.writeAttachments(inv.getObjectAttachments());
+    }
+
+    private boolean optimizedSerializationType(URL url) {
+        String serialization = url.getParameter(SERIALIZATION_KEY, DEFAULT_REMOTING_SERIALIZATION);
+        return "fst".equalsIgnoreCase(serialization) || "kryo".equalsIgnoreCase(serialization);
+    }
+
+    private boolean containComplexArguments(RpcInvocation invocation) {
+        for (int i = 0; i < invocation.getParameterTypes().length; ++i) {
+            if (invocation.getParameterTypes()[i] != invocation.getArguments()[i].getClass()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     @Override
